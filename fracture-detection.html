@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Fracture Detector</title>
+
+<style>
+</style>
+</head>
+
+<body>
+
+<div class="wordmark">Bone Fracture Detector</div>
+<div class="title">Acoustic Analysis</div>
+<div class="subtitle">128 Hz bone conduction protocol</div>
+
+<div class="card">
+  <div class="card-label">Recording sequence</div>
+
+  <div class="step-row">
+    <div class="step-num active" id="num1">1</div>
+    <div class="step-info">
+      <div class="label">Unfractured bone</div>
+      <div class="value" id="val1">Tap to start / stop</div>
+    </div>
+    <button class="rec-btn" id="btn1" onclick="startRecording(0)">
+      <div class="dot"></div>
+    </button>
+  </div>
+
+  <div class="step-row">
+    <div class="step-num" id="num2">2</div>
+    <div class="step-info">
+      <div class="label">Fractured bone</div>
+      <div class="value" id="val2">Record step 1 first</div>
+    </div>
+    <button class="rec-btn" id="btn2" disabled onclick="startRecording(1)">
+      <div class="dot"></div>
+    </button>
+  </div>
+
+  <div class="status-bar" id="status"></div>
+
+  <div class="divider" id="result-divider" style="display:none"></div>
+
+  <div class="result-area" id="result-area">
+    <div class="result-verdict" id="verdict"></div>
+    <div class="result-db" id="result-db"></div>
+    <div class="result-detail" id="result-detail"></div>
+    <button class="reset-btn" onclick="resetAll()">Reset</button>
+  </div>
+</div>
+
+<script>
+const TARGET_FREQ = 130.81;
+const SEARCH_BW   = 5;
+const THRESHOLD_DB = 3.5;
+
+let amplitudes = [null, null];
+let mediaStream = null;
+
+// tone generator
+let toneCtx = null;
+let oscillator = null;
+let gainNode = null;
+
+function startTone() {
+  if (toneCtx) return;
+
+  toneCtx = new (window.AudioContext || window.webkitAudioContext)();
+  oscillator = toneCtx.createOscillator();
+  gainNode = toneCtx.createGain();
+
+  oscillator.type = 'sine';
+  oscillator.frequency.value = 128;
+
+  gainNode.gain.value = 0.2;
+
+  oscillator.connect(gainNode).connect(toneCtx.destination);
+  oscillator.start();
+}
+
+function stopTone() {
+  if (!toneCtx) return;
+
+  oscillator.stop();
+  oscillator.disconnect();
+  gainNode.disconnect();
+  toneCtx.close();
+
+  toneCtx = null;
+}
+
+/* =========================
+   RECORDING TOGGLE
+========================= */
+let activeRecorder = null;
+let isRecording = false;
+let currentChunks = [];
+
+function setStatus(msg, type = '') {
+  const el = document.getElementById('status');
+  el.textContent = msg;
+  el.className = 'status-bar' + (type ? ' ' + type : '');
+}
+
+async function getMicStream() {
+  if (mediaStream) return mediaStream;
+  mediaStream = await navigator.mediaDevices.getUserMedia({
+    audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
+  });
+  return mediaStream;
+}
+
+function startRecording(idx) {
+
+  if (isRecording) {
+    activeRecorder.stop();
+    return;
+  }
+
+  const btn = document.getElementById('btn' + (idx+1));
+  document.getElementById('btn1').disabled = true;
+  document.getElementById('btn2').disabled = true;
+
+  setStatus('Preparing mic…', 'active');
+
+  getMicStream().then(stream => {
+
+    currentChunks = [];
+    const recorder = new MediaRecorder(stream);
+    activeRecorder = recorder;
+
+    recorder.ondataavailable = e => {
+      if (e.data.size > 0) currentChunks.push(e.data);
+    };
+
+    recorder.onstart = () => {
+      isRecording = true;
+      btn.classList.add('recording');
+      setStatus('Recording… (tap again to stop)', 'active');
+      startTone();
+    };
+
+    recorder.onstop = async () => {
+      isRecording = false;
+      btn.classList.remove('recording');
+      stopTone();
+
+      setStatus('Processing…', 'active');
+
+      try {
+        const blob = new Blob(currentChunks);
+        const arrayBuffer = await blob.arrayBuffer();
+
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+
+        const amp = await processAudio(audioBuffer);
+        amplitudes[idx] = amp;
+
+        onRecordingDone(idx, amp);
+
+      } catch (err) {
+        setStatus('Error: ' + err.message, 'error');
+      }
+
+      document.getElementById('btn1').disabled = false;
+      document.getElementById('btn2').disabled = (idx === 0);
+    };
+
+    recorder.start();
+
+  }).catch(() => {
+    setStatus('Mic error', 'error');
+  });
+}
+
+// signal processing
+
+async function processAudio(audioBuffer) {
+  return getPeakAmplitude(audioBuffer);
+}
+
+function fft(re, im) {
+  const N = re.length;
+  for (let i = 1, j = 0; i < N; i++) {
+    let bit = N >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i < j) {
+      [re[i], re[j]] = [re[j], re[i]];
+      [im[i], im[j]] = [im[j], im[i]];
+    }
+  }
+  for (let len = 2; len <= N; len <<= 1) {
+    const ang = -2 * Math.PI / len;
+    const wRe = Math.cos(ang), wIm = Math.sin(ang);
+    for (let i = 0; i < N; i += len) {
+      let curRe = 1, curIm = 0;
+      for (let j = 0; j < len / 2; j++) {
+        const uRe = re[i+j], uIm = im[i+j];
+        const vRe = re[i+j+len/2] * curRe - im[i+j+len/2] * curIm;
+        const vIm = re[i+j+len/2] * curIm + im[i+j+len/2] * curRe;
+        re[i+j] = uRe + vRe; im[i+j] = uIm + vIm;
+        re[i+j+len/2] = uRe - vRe; im[i+j+len/2] = uIm - vIm;
+        const newRe = curRe * wRe - curIm * wIm;
+        curIm = curRe * wIm + curIm * wRe;
+        curRe = newRe;
+      }
+    }
+  }
+}
+
+function getPeakAmplitude(audioBuffer) {
+  const raw = audioBuffer.getChannelData(0);
+  const fs = audioBuffer.sampleRate;
+  const N = Math.pow(2, Math.ceil(Math.log2(raw.length)));
+
+  const re = new Float32Array(N);
+  const im = new Float32Array(N);
+  re.set(raw);
+
+  fft(re, im);
+
+  let peakAmp = 0;
+
+  for (let k = 0; k < N / 2; k++) {
+    const freq = k * fs / N;
+    if (freq >= TARGET_FREQ - SEARCH_BW && freq <= TARGET_FREQ + SEARCH_BW) {
+      const mag = Math.sqrt(re[k]*re[k] + im[k]*im[k]);
+      if (mag > peakAmp) peakAmp = mag;
+    }
+  }
+
+  return peakAmp;
+}
+
+function onRecordingDone(idx, amp) {
+
+  if (idx === 0) {
+    document.getElementById('num1').textContent = '✓';
+    document.getElementById('btn2').disabled = false;
+    document.getElementById('val2').textContent = 'Tap to start / stop';
+    setStatus('Now record fractured bone');
+  } else {
+    showResult();
+  }
+}
+
+function showResult() {
+  const U = amplitudes[0];
+  const F = amplitudes[1];
+
+  const dB = 20 * Math.log10(F / U);
+  const isFracture = dB > THRESHOLD_DB;
+
+  document.getElementById('result-divider').style.display = 'block';
+  document.getElementById('result-area').classList.add('visible');
+
+  document.getElementById('verdict').textContent =
+    isFracture ? 'Fracture detected' : 'No fracture';
+
+  document.getElementById('result-db').textContent =
+    dB.toFixed(2) + ' dB';
+}
+
+function resetAll() {
+  amplitudes = [null, null];
+  location.reload();
+}
+</script>
+
+</body>
+</html>
