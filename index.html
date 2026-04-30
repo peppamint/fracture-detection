@@ -21,12 +21,12 @@
   .rec-btn.recording { background: #fa3e3e; animation: pulse 1.5s infinite; }
   .dot { width: 14px; height: 14px; background: #fa3e3e; border-radius: 50%; }
   .recording .dot { background: white; border-radius: 2px; }
-  .status-bar { margin-top: 16px; font-size: 14px; text-align: center; color: #65676b; }
+  .status-bar { margin-top: 16px; font-size: 14px; text-align: center; color: #65676b; min-height: 1.2em; }
   .status-bar.active { color: #1877f2; font-weight: bold; }
   .result-area { display: none; margin-top: 20px; text-align: center; border-top: 1px solid #eee; padding-top: 20px; }
   .result-area.visible { display: block; }
   .result-verdict { font-size: 20px; font-weight: bold; margin-bottom: 8px; }
-  .reset-btn { margin-top: 16px; padding: 8px 16px; border: none; background: #eee; border-radius: 8px; cursor: pointer; }
+  .reset-btn { margin-top: 16px; padding: 10px 20px; border: none; background: #1877f2; color: white; border-radius: 8px; cursor: pointer; font-weight: bold; }
   @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
 </style>
 </head>
@@ -43,7 +43,7 @@
   <div class="step-row">
     <div class="step-num active" id="num1">1</div>
     <div class="step-info">
-      <div class="label">Unfractured bone</div>
+      <div class="label">Step 1: Unfractured bone</div>
       <div class="value" id="val1">Tap to start</div>
     </div>
     <button class="rec-btn" id="btn1" onclick="handleButtonClick(0)">
@@ -54,7 +54,7 @@
   <div class="step-row">
     <div class="step-num" id="num2">2</div>
     <div class="step-info">
-      <div class="label">Fractured bone</div>
+      <div class="label">Step 2: Suspected fracture</div>
       <div class="value" id="val2">Record step 1 first</div>
     </div>
     <button class="rec-btn" id="btn2" disabled onclick="handleButtonClick(1)">
@@ -66,13 +66,13 @@
 
   <div class="result-area" id="result-area">
     <div class="result-verdict" id="verdict"></div>
-    <div id="result-db"></div>
-    <button class="reset-btn" onclick="resetAll()">Reset Test</button>
+    <div id="result-db" style="color: #65676b; font-size: 14px;"></div>
+    <button class="reset-btn" onclick="resetAll()">Start New Test</button>
   </div>
 </div>
 
 <script>
-const TARGET_FREQ = 128; // Matched to oscillator
+const TARGET_FREQ = 128; 
 const SEARCH_BW = 5;
 const THRESHOLD_DB = 3.5;
 
@@ -82,33 +82,43 @@ let activeRecorder = null;
 let isRecording = false;
 
 // Audio Contexts
-let toneCtx = null;
-let oscillator = null;
+let audioCtx = null;
+let currentOscillator = null;
 let gainNode = null;
 
 async function initAudioContext() {
-  if (!toneCtx) {
-    toneCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (!audioCtx) {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
   }
-  if (toneCtx.state === 'suspended') {
-    await toneCtx.resume();
+  if (audioCtx.state === 'suspended') {
+    await audioCtx.resume();
   }
 }
 
 function startTone() {
-  oscillator = toneCtx.createOscillator();
-  gainNode = toneCtx.createGain();
-  oscillator.type = 'sine';
-  oscillator.frequency.value = TARGET_FREQ;
-  gainNode.gain.value = 0.3;
-  oscillator.connect(gainNode).connect(toneCtx.destination);
-  oscillator.start();
+  // We create a NEW oscillator every time start is called
+  currentOscillator = audioCtx.createOscillator();
+  gainNode = audioCtx.createGain();
+  
+  currentOscillator.type = 'sine';
+  currentOscillator.frequency.setValueAtTime(TARGET_FREQ, audioCtx.currentTime);
+  
+  // Volume set to 0.5 (50%) to be clearly audible but avoid distortion
+  gainNode.gain.setValueAtTime(0.5, audioCtx.currentTime);
+  
+  currentOscillator.connect(gainNode).connect(audioCtx.destination);
+  currentOscillator.start();
 }
 
 function stopTone() {
-  if (oscillator) {
-    oscillator.stop();
-    oscillator.disconnect();
+  if (currentOscillator) {
+    currentOscillator.stop();
+    currentOscillator.disconnect();
+    currentOscillator = null;
+  }
+  if (gainNode) {
+    gainNode.disconnect();
+    gainNode = null;
   }
 }
 
@@ -128,51 +138,69 @@ async function handleButtonClick(idx) {
 
 async function startRecordingSequence(idx) {
   try {
+    // 1. Initialize Audio Context first (Crucial for mobile)
     await initAudioContext();
-    setStatus('Requesting Mic...', true);
+    setStatus('Initializing Mic...', true);
     
+    // 2. Request Mic
     mediaStream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
+      audio: { 
+        echoCancellation: false, 
+        noiseSuppression: false, 
+        autoGainControl: false 
+      }
     });
 
     const chunks = [];
     activeRecorder = new MediaRecorder(mediaStream);
     
-    activeRecorder.ondataavailable = e => chunks.push(e.data);
+    activeRecorder.ondataavailable = e => {
+      if (e.data.size > 0) chunks.push(e.data);
+    };
     
     activeRecorder.onstart = () => {
       isRecording = true;
       document.getElementById('btn' + (idx + 1)).classList.add('recording');
-      setStatus('Recording... Tap button to STOP', true);
+      setStatus('RECORDING & PLAYING 128Hz...', true);
+      
+      // Start the tone exactly when recording starts
       startTone();
     };
 
     activeRecorder.onstop = async () => {
       isRecording = false;
-      stopTone();
+      stopTone(); // Stop the tone
+      
       document.getElementById('btn' + (idx + 1)).classList.remove('recording');
-      setStatus('Processing signal...');
+      setStatus('Analyzing frequency data...');
       
       const blob = new Blob(chunks);
       const arrayBuffer = await blob.arrayBuffer();
-      const audioBuffer = await toneCtx.decodeAudioData(arrayBuffer);
-      const amp = getPeakAmplitude(audioBuffer);
+      // Use the same audioCtx to decode
+      const decodedBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+      const amp = getPeakAmplitude(decodedBuffer);
       
       amplitudes[idx] = amp;
       finalizeStep(idx);
+      
+      // Clean up the mic stream
+      mediaStream.getTracks().forEach(track => track.stop());
     };
 
     activeRecorder.start();
   } catch (err) {
-    setStatus('Error: ' + err.message);
+    if (err.name === 'NotAllowedError') {
+      setStatus('Error: Mic Permission Denied. Ensure you are using HTTPS.');
+    } else {
+      setStatus('Error: ' + err.message);
+    }
     console.error(err);
   }
 }
 
 function stopRecording() {
-  if (activeRecorder && activeRecorder.state !== 'inactive') {
+  if (activeRecorder && activeRecorder.state === 'recording') {
     activeRecorder.stop();
-    mediaStream.getTracks().forEach(track => track.stop());
   }
 }
 
@@ -189,6 +217,7 @@ function getPeakAmplitude(audioBuffer) {
   let peakAmp = 0;
   for (let k = 0; k < N / 2; k++) {
     const freq = k * fs / N;
+    // Look for our 128Hz tone in the recording
     if (freq >= TARGET_FREQ - SEARCH_BW && freq <= TARGET_FREQ + SEARCH_BW) {
       const mag = Math.sqrt(re[k]*re[k] + im[k]*im[k]);
       if (mag > peakAmp) peakAmp = mag;
@@ -229,23 +258,25 @@ function finalizeStep(idx) {
     document.getElementById('btn2').disabled = false;
     document.getElementById('val2').textContent = 'Tap to start';
     document.getElementById('num2').classList.add('active');
-    setStatus('Step 1 complete. Now record suspected bone.');
+    setStatus('Step 1 complete. Proceed to Step 2.');
   } else {
     showResult();
   }
 }
 
 function showResult() {
-  const U = amplitudes[0];
-  const F = amplitudes[1];
+  const U = amplitudes[0] || 0.0001; // Avoid divide by zero
+  const F = amplitudes[1] || 0.0001;
   const dB = 20 * Math.log10(F / U);
   const isFracture = dB > THRESHOLD_DB;
 
   document.getElementById('result-area').classList.add('visible');
-  document.getElementById('verdict').textContent = isFracture ? '⚠ Fracture Likely' : 'No Fracture Detected';
-  document.getElementById('verdict').style.color = isFracture ? '#fa3e3e' : '#2db84c';
-  document.getElementById('result-db').textContent = 'Acoustic Delta: ' + dB.toFixed(2) + ' dB';
-  setStatus('Analysis Complete');
+  const verdictEl = document.getElementById('verdict');
+  verdictEl.textContent = isFracture ? '⚠ FRACTURE DETECTED' : 'NO FRACTURE DETECTED';
+  verdictEl.style.color = isFracture ? '#fa3e3e' : '#2db84c';
+  
+  document.getElementById('result-db').textContent = 'Relative Sound Gain: ' + dB.toFixed(2) + ' dB';
+  setStatus('Test Complete');
 }
 
 function resetAll() {
